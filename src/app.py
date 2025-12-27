@@ -1,7 +1,7 @@
 import sys
 import numpy as np
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QImage, QPixmap
 from PySide6.QtWidgets import (
     QApplication, 
@@ -120,6 +120,14 @@ class MainWindow(QMainWindow):
         self.sync_labels()
         self.render()
 
+        # --- Frame loop (30 FPS) ---
+        self.fps = 30
+        interval_ms = int(1000 / self.fps)
+
+        self.timer = QTimer()
+        self.timer.timeout.connect(self.on_tick)
+        self.timer.start(interval_ms)
+
     def sync_labels(self):
         self.wl_label.setText(f"{self.wl:5d}")
         self.ww_label.setText(f"{self.ww:5d}")
@@ -140,6 +148,13 @@ class MainWindow(QMainWindow):
         self.image_label.setPixmap(
             pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         )
+
+    def on_tick(self):
+        # Generate next frame (placeholder: flat-field noise)
+        # Later: replace with physics-based simulation pipeline.
+        self.img_u16 = make_flat_field_noise_u16(768, 768, mean=32000, sigma=2200)
+        # Update display using current WL/WW
+        self.render()
 
     def resizeEvent(self, event):
         # Re-render on resize to keep scaling correct
