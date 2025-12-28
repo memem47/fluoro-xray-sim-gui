@@ -11,7 +11,12 @@ from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
     QSlider,
+    QPushButton,
+    QFileDialog,
+    QMessageBox,
 )
+
+import imageio.v2 as imageio
 
 def make_flat_field_noise_u16(h: int, w: int, mean: int = 30000, sigma: int = 2500) -> np.ndarray:
     """
@@ -60,6 +65,24 @@ def u16_to_qimage_grayscale8_wlww(img_u16: np.ndarray, wl:int, ww: int) -> QImag
     qimg = QImage(img8.data, w, h, w, QImage.Format_Grayscale8).copy()
     return qimg
 
+def u16_to_u8_wlww(img_u16: np.ndarray, wl:int, ww: int) -> np.ndarray:
+    """
+    Convert uint16 (H,W) to uint8 (H,W) using Window/Level.
+    This returns a numpy array for recording/export.
+    """
+    if img_u16.dtype != np.uint16 or img_u16.ndim != 2:
+        raise ValueError("Expected (H,W) uint16 image")
+    
+    ww = max(int(ww), 1)
+    wl = int(wl)
+
+    lower = wl - ww / 2.0
+    img_f = img_u16.astype(np.float32)
+
+    img8 = (img_f - lower) * (255.0 / ww)
+    img8 = np.clip(img8, 0, 255).astype(np.uint8)
+    return img8
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -73,6 +96,12 @@ class MainWindow(QMainWindow):
         # Default WL/WW (reasonable defaults for 16-bit)
         self.wl = 32768
         self.ww = 65535
+
+        # --- Recording state ---
+        self.is_recoding = False
+        self.record_frames: list[np.ndarray] = []
+        self.record_target_frames = 0
+        self.record_path = ""
 
         # --- UI ---
         root = QWidget()
@@ -116,6 +145,18 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(controls, stretch=0)        
         self.setCentralWidget(root)
 
+        # Record now
+        record_row = QHBoxLayout()
+        self.btn_record_5s = QPushButton("Record 5s (MP4)")
+        self.btn_record_5s.clicked.connect(self.on_record_5s)
+
+        self.status_label = QLabel("Ready")
+        self.status_label.setAlignment(Qt.AlignLeft)
+
+        record_row.addWidget(self.btn_record_5s)
+        record_row.addWidget(self.status_label, stretch=1)
+        controls_layout.addLayout(record_row)
+
         # Initial label text + render
         self.sync_labels()
         self.render()
@@ -153,8 +194,89 @@ class MainWindow(QMainWindow):
         # Generate next frame (placeholder: flat-field noise)
         # Later: replace with physics-based simulation pipeline.
         self.img_u16 = make_flat_field_noise_u16(768, 768, mean=32000, sigma=2200)
+        
+        # If recoding, store current display frame (uint8)
+        if self.is_recoding:
+            frame_u8 = u16_to_u8_wlww(self.img_u16, self.wl, self.ww)
+            self.record_frames.append(frame_u8)
+
+            remaining = self.record_target_frames - len(self.record_frames)
+            self.status_label.setText(f"Recording... {remaining} frames left")
+
+            if len(self.record_frames) >= self.record_target_frames:
+                self.finish_recording()
+
         # Update display using current WL/WW
         self.render()
+
+    def on_record_5s(self):
+        if self.is_recoding:
+            return # Safety: ignore while recoding
+        
+        # Choose output path
+        path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save MP4",
+            "fluoro_recoring.mp4",
+            "MP4 Video (*.mp4)"
+        )
+        if not path:
+            return
+        
+        # Initialize recoding
+        seconds = 5
+        self.record_path = path
+        self.record_frames = []
+        self.record_target_frames = int(self.fps * seconds)
+        self.is_recoding = True
+
+        self.btn_record_5s.setEnabled(False)
+        self.status_label.setText(f"Recording... {self.record_target_frames} frames left")
+
+    def finish_recording(self):
+        # Stop recoding state first (so UI doesn't keep appending)
+        self.is_recoding = False
+        self.btn_record_5s.setEnabled(True)
+
+        try:
+            self.save_mp4(self.record_path, self.record_frames, fps=self.fps)
+            self.status_label.setText("Saved MP4")
+            QMessageBox.information(self, "Export", f"Saved MP4:\n{self.record_path}")
+        except Exception as e:
+            self.status_label.setText("Export failed")
+            QMessageBox.critical(self, "Export failed", str(e))
+        finally:
+            self.record_frames = []
+            self.record_target_frames = 0
+            self.record_path = ""
+
+    def save_mp4(self, path: str, frames_u8: list[np.ndarray], fps: int):
+        """
+        Save list of uint8 grayscale frames (H,W) to MP4.
+        Many MP4 encoders expect RGB, so we replicate grayscale to 3 channels.
+
+        Args:
+            path (str): _description_
+            frames_u8 (list[np.ndarray]): _description_
+            fps (int): _description_
+        """
+        if not frames_u8:
+            raise ValueError("No frames to save")
+        
+        # Convert to RGB frames for broad compatibility
+        rgb_frames = []
+        for f in frames_u8:
+            if f.dtype != np.uint8 or f.ndim != 2:
+                raise ValueError("Expected uint8 grayscale frames (H,W).")
+            rgb = np.repeat(f[:,:,None], 3, axis=2)  # (H,W,3)
+            rgb_frames.append(rgb)
+        
+        writer = imageio.get_writer(path, fps=fps)
+        try:
+            for rgb in rgb_frames:
+                writer.append_data(rgb)
+        finally:
+            writer.close()
 
     def resizeEvent(self, event):
         # Re-render on resize to keep scaling correct
