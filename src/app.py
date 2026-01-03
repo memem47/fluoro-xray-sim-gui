@@ -101,6 +101,72 @@ def apply_poisson_noise_u16(base_u16: np.ndarray, i0: int) -> np.ndarray:
     out = np.clip(noisy / i0 * 65535.0, 0, 65535).astype(np.uint16)
     return out
 
+def lowfreq_approx_u16(img_u16: np.ndarray, downsample: int = 16) -> np.ndarray:
+    """
+    Create a low-frequency approximation by downsampling then upsampling.
+    No extra dependencies, cheap enough for real-time.
+
+    Args:
+        img_u16 (np.ndarray): _description_
+        downsample (int, optional): _description_. Defaults to 16.
+
+    Raises:
+        ValueError: _description_
+        ValueError: _description_
+
+    Returns:
+        np.ndarray: _description_
+    """
+    if downsample <= 1:
+        return img_u16
+    
+    h, w = img_u16.shape
+    ds = downsample
+
+    # crop to multiple of ds for simplicity
+    h2 = (h // ds) * ds
+    w2 = (w // ds) * ds
+    img = img_u16[:h2, :w2].astype(np.float32)
+
+    small = img.reshape(h2 // ds, ds, w2 // ds, ds).mean(axis=(1,3))
+    up = np.repeat(np.repeat(small, ds, axis=0), ds, axis=1)
+
+    out = np.zeros((h, w), dtype=np.float32)
+    out[:h2, :w2] = up
+    if h2 < h:
+        out[h2:, :w2] = up[-1:, :]
+    if w2 < w:
+        out[:h2, w2:] = up[:, -1:]
+    if h2 < h and w2 < w:
+        out[h2:, w2:] = up[-1:, -1:]
+
+    return np.clip(out, 0, 65535).astype(np.uint16)
+
+def apply_scatter_veil_u16(base_u16: np.ndarray, strength: float, downsample: int = 16) -> np.ndarray:
+    """
+    Add a low-frequency `veil` component (scatter-like) to the base signal.
+    strength: 0..1
+
+    Args:
+        img_u16 (np.ndarray): _description_
+        strength (float): _description_
+        downsample (int, optional): _description_. Defaults to 16.
+
+    Raises:
+        ValueError: _description_
+        ValueError: _description_
+
+    Returns:
+        np.ndarray: _description_
+    """
+    strength = float(np.clip(strength, 0.0, 1.0))
+    lf = lowfreq_approx_u16(base_u16, downsample=downsample).astype(np.float32)
+    base = base_u16.astype(np.float32)
+
+    # Additive veil: base + strength * lowfreq
+    out = base + strength * lf
+    return np.clip(out, 0, 65535).astype(np.uint16)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -124,6 +190,11 @@ class MainWindow(QMainWindow):
         # --- Physics parameters (Step 4-1) ---
         self.enable_poisson = True
         self.poisson_i0 = 30000 # mean intensity for Poisson noise strength
+
+        # --- Scatter parameters (Step 4-2) ---
+        self.enable_scatter = True
+        self.scatter_strength = 0.25
+        self.scatter_downsample = 16
 
         # --- UI ---
         root = QWidget()
@@ -199,6 +270,26 @@ class MainWindow(QMainWindow):
 
         controls_layout.addLayout(poisson_row)
 
+        # Scatter controls
+        scatter_row = QHBoxLayout()
+
+        self.scatter_checkbox = QCheckBox("Scatter veil")
+        self.scatter_checkbox.setChecked(self.enable_scatter)
+        self.scatter_checkbox.stateChanged.connect(self.on_scatter_toggled)
+
+        self.scatter_label = QLabel()
+        self.scatter_slider = QSlider(Qt.Horizontal)
+        self.scatter_slider.setRange(0, 100)   # Scatter strength in %
+        self.scatter_slider.setValue(int(self.scatter_strength * 100))
+        self.scatter_slider.valueChanged.connect(self.on_scatter_strength_changed)
+
+        scatter_row.addWidget(self.scatter_checkbox)
+        scatter_row.addWidget(QLabel("Strength"))
+        scatter_row.addWidget(self.scatter_slider, stretch=1)
+        scatter_row.addWidget(self.scatter_label)
+
+        controls_layout.addLayout(scatter_row)
+
         # Initial label text + render
         self.sync_labels()
         self.render()
@@ -215,6 +306,7 @@ class MainWindow(QMainWindow):
         self.wl_label.setText(f"{self.wl:5d}")
         self.ww_label.setText(f"{self.ww:5d}")
         self.poisson_label.setText(f"{self.poisson_i0:5d}")
+        self.scatter_label.setText(f"{int(self.scatter_strength*100):3d}%")
 
     def on_wl_changed(self, value: int):
         self.wl = int(value)
@@ -233,6 +325,14 @@ class MainWindow(QMainWindow):
         self.poisson_i0 = int(value)
         self.sync_labels()
 
+    
+    def on_scatter_toggled(self, state: int):
+        self.enable_scatter = (state == Qt.Checked)
+
+    def on_scatter_strength_changed(self, value: int):
+        self.scatter_strength = float(value) / 100.0
+        self.sync_labels()
+
     def render(self):
         qimg = u16_to_qimage_grayscale8_wlww(self.img_u16, self.wl, self.ww)
         pix = QPixmap.fromImage(qimg)
@@ -244,6 +344,9 @@ class MainWindow(QMainWindow):
         # Base "flat-field" signal (later: physics pipeline will replace this)
         base = make_flat_field_noise_u16(768, 768, mean=32000, sigma=800)  # sigmaは少し小さめでもOK
 
+        if self.enable_scatter:
+            base = apply_scatter_veil_u16(base, self.scatter_strength, downsample=self.scatter_downsample)
+            
         # Apply Poisson noise (quantum noise)
         if self.enable_poisson:
             self.img_u16 = apply_poisson_noise_u16(base, self.poisson_i0)
