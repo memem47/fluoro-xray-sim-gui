@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFileDialog,
     QMessageBox,
+    QCheckBox,
 )
 
 import imageio.v2 as imageio
@@ -83,6 +84,23 @@ def u16_to_u8_wlww(img_u16: np.ndarray, wl:int, ww: int) -> np.ndarray:
     img8 = np.clip(img8, 0, 255).astype(np.uint8)
     return img8
 
+def apply_poisson_noise_u16(base_u16: np.ndarray, i0: int) -> np.ndarray:
+    """
+    Apply Poisson noise assuming the signal represents expected photon counts.
+    i0 controls the scale of counts. Larger i0 -> relatively lower noise.
+    """
+    i0 = max(int(i0), 1)
+
+    # Normalize base image to [0,1] then scale to counts ~ i0
+    base = base_u16.astype(np.float32) / 65535.0
+    lam = np.clip(base * i0, 0, None)
+
+    noisy = np.random.poisson(lam).astype(np.float32)
+
+    # Rescale back to uint16 range
+    out = np.clip(noisy / i0 * 65535.0, 0, 65535).astype(np.uint16)
+    return out
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -98,10 +116,14 @@ class MainWindow(QMainWindow):
         self.ww = 65535
 
         # --- Recording state ---
-        self.is_recoding = False
+        self.is_recording = False
         self.record_frames: list[np.ndarray] = []
         self.record_target_frames = 0
         self.record_path = ""
+
+        # --- Physics parameters (Step 4-1) ---
+        self.enable_poisson = True
+        self.poisson_i0 = 30000 # mean intensity for Poisson noise strength
 
         # --- UI ---
         root = QWidget()
@@ -157,6 +179,26 @@ class MainWindow(QMainWindow):
         record_row.addWidget(self.status_label, stretch=1)
         controls_layout.addLayout(record_row)
 
+        # Poisson (quantum) noise controls
+        poisson_row = QHBoxLayout()
+
+        self.poisson_checkbox = QCheckBox("Quantum noise (Poisson)")
+        self.poisson_checkbox.setChecked(self.enable_poisson)
+        self.poisson_checkbox.stateChanged.connect(self.on_poisson_toggled)
+
+        self.poisson_label = QLabel()
+        self.poisson_slider = QSlider(Qt.Horizontal)
+        self.poisson_slider.setRange(1000, 65000)   # I0 range
+        self.poisson_slider.setValue(self.poisson_i0)
+        self.poisson_slider.valueChanged.connect(self.on_poisson_i0_changed)
+
+        poisson_row.addWidget(self.poisson_checkbox)
+        poisson_row.addWidget(QLabel("I0"))
+        poisson_row.addWidget(self.poisson_slider, stretch=1)
+        poisson_row.addWidget(self.poisson_label)
+
+        controls_layout.addLayout(poisson_row)
+
         # Initial label text + render
         self.sync_labels()
         self.render()
@@ -172,6 +214,7 @@ class MainWindow(QMainWindow):
     def sync_labels(self):
         self.wl_label.setText(f"{self.wl:5d}")
         self.ww_label.setText(f"{self.ww:5d}")
+        self.poisson_label.setText(f"{self.poisson_i0:5d}")
 
     def on_wl_changed(self, value: int):
         self.wl = int(value)
@@ -183,6 +226,13 @@ class MainWindow(QMainWindow):
         self.sync_labels()
         self.render()
 
+    def on_poisson_toggled(self, state: int):
+        self.enable_poisson = (state == Qt.Checked)
+
+    def on_poisson_i0_changed(self, value: int):
+        self.poisson_i0 = int(value)
+        self.sync_labels()
+
     def render(self):
         qimg = u16_to_qimage_grayscale8_wlww(self.img_u16, self.wl, self.ww)
         pix = QPixmap.fromImage(qimg)
@@ -191,12 +241,17 @@ class MainWindow(QMainWindow):
         )
 
     def on_tick(self):
-        # Generate next frame (placeholder: flat-field noise)
-        # Later: replace with physics-based simulation pipeline.
-        self.img_u16 = make_flat_field_noise_u16(768, 768, mean=32000, sigma=2200)
-        
-        # If recoding, store current display frame (uint8)
-        if self.is_recoding:
+        # Base "flat-field" signal (later: physics pipeline will replace this)
+        base = make_flat_field_noise_u16(768, 768, mean=32000, sigma=800)  # sigmaは少し小さめでもOK
+
+        # Apply Poisson noise (quantum noise)
+        if self.enable_poisson:
+            self.img_u16 = apply_poisson_noise_u16(base, self.poisson_i0)
+        else:
+            self.img_u16 = base
+
+        # If recording, store current display frame (uint8)
+        if self.is_recording:
             frame_u8 = u16_to_u8_wlww(self.img_u16, self.wl, self.ww)
             self.record_frames.append(frame_u8)
 
@@ -206,11 +261,12 @@ class MainWindow(QMainWindow):
             if len(self.record_frames) >= self.record_target_frames:
                 self.finish_recording()
 
-        # Update display using current WL/WW
+        # Update display
         self.render()
 
+
     def on_record_5s(self):
-        if self.is_recoding:
+        if self.is_recording:
             return # Safety: ignore while recoding
         
         # Choose output path
@@ -228,14 +284,14 @@ class MainWindow(QMainWindow):
         self.record_path = path
         self.record_frames = []
         self.record_target_frames = int(self.fps * seconds)
-        self.is_recoding = True
+        self.is_recording = True
 
         self.btn_record_5s.setEnabled(False)
         self.status_label.setText(f"Recording... {self.record_target_frames} frames left")
 
     def finish_recording(self):
         # Stop recoding state first (so UI doesn't keep appending)
-        self.is_recoding = False
+        self.is_recording = False
         self.btn_record_5s.setEnabled(True)
 
         try:
