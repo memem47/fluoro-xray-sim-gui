@@ -167,6 +167,37 @@ def apply_scatter_veil_u16(base_u16: np.ndarray, strength: float, downsample: in
     out = base + strength * lf
     return np.clip(out, 0, 65535).astype(np.uint16)
 
+def apply_motion_blur_u16(
+        current_u16: np.ndarray,
+        prev_u16: np.ndarray | None,
+        alpha: float,
+) -> np.ndarray:
+    """
+    Simple exponential motion blur using previous frame.
+    out = (1 - alpha) * current + alpha * prev
+
+    Args:
+        current_u16 (np.ndarray): _description_
+        prev_u16 (np.ndarray | None): _description_
+        alpha (float): _description_
+
+    Raises:
+        ValueError: _description_
+        ValueError: _description_
+
+    Returns:
+        np.ndarray: _description_
+    """
+    if prev_u16 is None:
+        return current_u16
+    
+    alpha = float(np.clip(alpha, 0.0, 0.99))
+    cur = current_u16.astype(np.float32)
+    prev = prev_u16.astype(np.float32)
+
+    out = (1.0 - alpha) * cur + alpha * prev
+    return np.clip(out, 0, 65535).astype(np.uint16)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -195,6 +226,11 @@ class MainWindow(QMainWindow):
         self.enable_scatter = True
         self.scatter_strength = 0.25
         self.scatter_downsample = 16
+        
+        # --- Motion blur parameters (Step 4-3) ---
+        self.enable_motion_blur = True
+        self.motion_blur_alpha = 0.5
+        self.prev_frame_u16 = None
 
         # --- UI ---
         root = QWidget()
@@ -255,7 +291,7 @@ class MainWindow(QMainWindow):
 
         self.poisson_checkbox = QCheckBox("Quantum noise (Poisson)")
         self.poisson_checkbox.setChecked(self.enable_poisson)
-        self.poisson_checkbox.stateChanged.connect(self.on_poisson_toggled)
+        self.poisson_checkbox.toggled.connect(self.on_poisson_toggled)
 
         self.poisson_label = QLabel()
         self.poisson_slider = QSlider(Qt.Horizontal)
@@ -275,7 +311,7 @@ class MainWindow(QMainWindow):
 
         self.scatter_checkbox = QCheckBox("Scatter veil")
         self.scatter_checkbox.setChecked(self.enable_scatter)
-        self.scatter_checkbox.stateChanged.connect(self.on_scatter_toggled)
+        self.scatter_checkbox.toggled.connect(self.on_scatter_toggled)
 
         self.scatter_label = QLabel()
         self.scatter_slider = QSlider(Qt.Horizontal)
@@ -289,6 +325,26 @@ class MainWindow(QMainWindow):
         scatter_row.addWidget(self.scatter_label)
 
         controls_layout.addLayout(scatter_row)
+
+        # Motion blur controls
+        motion_row = QHBoxLayout()
+
+        self.motion_checkbox = QCheckBox("Motion blur")
+        self.motion_checkbox.setChecked(self.enable_motion_blur)
+        self.motion_checkbox.toggled.connect(self.on_motion_blur_toggled)
+
+        self.motion_label = QLabel()
+        self.motion_slider = QSlider(Qt.Horizontal)
+        self.motion_slider.setRange(0, 90)
+        self.motion_slider.setValue(int(self.motion_blur_alpha * 100))
+        self.motion_slider.valueChanged.connect(self.on_motion_blur_alpha_changed)
+
+        motion_row.addWidget(self.motion_checkbox)
+        motion_row.addWidget(QLabel("Strength"))
+        motion_row.addWidget(self.motion_slider, stretch=1)
+        motion_row.addWidget(self.motion_label)
+
+        controls_layout.addLayout(motion_row)
 
         # Initial label text + render
         self.sync_labels()
@@ -307,6 +363,7 @@ class MainWindow(QMainWindow):
         self.ww_label.setText(f"{self.ww:5d}")
         self.poisson_label.setText(f"{self.poisson_i0:5d}")
         self.scatter_label.setText(f"{int(self.scatter_strength*100):3d}%")
+        self.motion_label.setText(f"{int(self.motion_blur_alpha*100):3d}%")
 
     def on_wl_changed(self, value: int):
         self.wl = int(value)
@@ -318,19 +375,27 @@ class MainWindow(QMainWindow):
         self.sync_labels()
         self.render()
 
-    def on_poisson_toggled(self, state: int):
-        self.enable_poisson = (state == Qt.Checked)
+    def on_poisson_toggled(self, checked: bool):
+        self.enable_poisson = checked
 
     def on_poisson_i0_changed(self, value: int):
         self.poisson_i0 = int(value)
         self.sync_labels()
-
     
-    def on_scatter_toggled(self, state: int):
-        self.enable_scatter = (state == Qt.Checked)
+    def on_scatter_toggled(self, checked: bool):
+        self.enable_scatter = checked
 
     def on_scatter_strength_changed(self, value: int):
         self.scatter_strength = float(value) / 100.0
+        self.sync_labels()
+    
+    def on_motion_blur_toggled(self, checked: bool):
+        self.enable_motion_blur = checked
+        if not self.enable_motion_blur:
+            self.prev_frame_u16 = None
+
+    def on_motion_blur_alpha_changed(self, value: int):
+        self.motion_blur_alpha = float(value) / 100.0
         self.sync_labels()
 
     def render(self):
@@ -345,7 +410,21 @@ class MainWindow(QMainWindow):
         base = make_flat_field_noise_u16(768, 768, mean=32000, sigma=800)  # sigmaは少し小さめでもOK
 
         if self.enable_scatter:
-            base = apply_scatter_veil_u16(base, self.scatter_strength, downsample=self.scatter_downsample)
+            base = apply_scatter_veil_u16(
+                base, 
+                self.scatter_strength, 
+                self.scatter_downsample
+            )
+        
+        if self.enable_motion_blur:
+            base = apply_motion_blur_u16(
+                base,
+                self.prev_frame_u16,
+                self.motion_blur_alpha
+            )
+            self.prev_frame_u16 = base.copy()
+        else:
+            self.prev_frame_u16 = None
             
         # Apply Poisson noise (quantum noise)
         if self.enable_poisson:
