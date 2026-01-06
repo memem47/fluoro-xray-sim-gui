@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
     QCheckBox,
+    QComboBox,
 )
 
 import imageio.v2 as imageio
@@ -198,6 +199,88 @@ def apply_motion_blur_u16(
     out = (1.0 - alpha) * cur + alpha * prev
     return np.clip(out, 0, 65535).astype(np.uint16)
 
+def smoothstep01(x: np.ndarray) -> np.ndarray:
+    """
+    Smoothstep function from 0 to 1.
+    x: assumed in [0,1]
+    """
+    x = np.clip(x, 0.0, 1.0)
+    return x * x * (3 - 2 * x)
+
+def make_collimation_mask(h: int, w: int, shape: str, size: float, soft_px: int) -> np.ndarray:
+    """
+    Returns float32 mask in [0,1]. 1=inside field, 0=outside.
+    shape: "Rectangle" or "Circle"
+    size: 0.1..1.0 (relative aperture size)
+    soft_px: soft edge width in pixels (0 => hard edge)
+
+    Args:
+        h (int): _description_
+        w (int): _description_
+        shape (str): _description_
+        size (float): _description_
+        soft_px (int): _description_
+
+    Raises:
+        ValueError: _description_
+        ValueError: _description_
+
+    Returns:
+        np.ndarray: _description_
+    """
+    size = float(np.clip(size, 0.1, 1.0))
+    soft = int(max(soft_px, 0))
+
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    cx = (w - 1) / 2.0
+    cy = (h - 1) / 2.0
+    x = xx - cx
+    y = yy - cy
+
+    if shape == "Circle":
+        r = min(h, w) * 0.5 * size
+        dist = np.sqrt(x**2 + y**2)
+    else:
+        # Rectangle (axis-aligned)                 
+        hx = w * 0.5 * size
+        hy = h * 0.5 * size
+        # signed distance to rectangle boundary (positive outside)
+        dx = np.abs(x) - hx
+        dy = np.abs(y) - hy
+        dist = np.maximum(dx, dy)
+
+    if soft <= 0:
+        return (dist <= 0).astype(np.float32)
+
+    # Soft edge: map dist in [-soft, soft] to [1..0]
+    t = (-dist + soft) / (2.0 * soft)
+    return smoothstep01(t).astype(np.float32)
+
+def apply_collimation_u16(img_u16: np.ndarray, mask01: np.ndarray, 
+                  outside_level: float) -> np.ndarray:
+    """
+    Apply collimation  as multiplicative attenuation with a floor outside_level.
+    out = img * (outside + (1-outside)*mask)
+
+    Args:
+        img_u16 (np.ndarray): _description_
+        mask01 (np.ndarray): _description_
+        outside (float): _description_
+
+    Raises:
+        ValueError: _description_
+        ValueError: _description_
+
+    Returns:
+        np.ndarray: _description_
+    """
+    outside = float(np.clip(outside_level, 0.0, 1.0))
+    img = img_u16.astype(np.float32)
+    m = mask01.astype(np.float32)
+    gain = outside + (1.0 - outside) * m
+    out = img * gain
+    return np.clip(out, 0, 65535).astype(np.uint16)
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -231,6 +314,16 @@ class MainWindow(QMainWindow):
         self.enable_motion_blur = True
         self.motion_blur_alpha = 0.5
         self.prev_frame_u16 = None
+
+        # --- Collimation parameters (Step 4-4) ---
+        self.enable_collimation = True
+        self.collimation_shape = "Rectangle"  # "Rectangle" or "Circle"
+        self.collimation_size = 0.85
+        self.collimation_soft_px = 24
+        self.collimation_outside = 0.02
+
+        self._collimation_mask = None
+        self._collimation_mask_key = None
 
         # --- UI ---
         root = QWidget()
@@ -346,6 +439,50 @@ class MainWindow(QMainWindow):
 
         controls_layout.addLayout(motion_row)
 
+        # Collimation controls
+        col_row = QHBoxLayout()
+        self.col_checkbox = QCheckBox("Collimation")
+        self.col_checkbox.setChecked(self.enable_collimation)
+        self.col_checkbox.toggled.connect(self.on_collimation_toggled)
+
+        self.col_shape = QComboBox()
+        self.col_shape.addItems(["Rectangle", "Circle"])
+        self.col_shape.setCurrentText(self.collimation_shape)
+        self.col_shape.currentTextChanged.connect(self.on_collimation_shape_changed)
+
+        self.col_size_label = QLabel()
+        self.col_size = QSlider(Qt.Horizontal)
+        self.col_size.setRange(10, 100)   # 0.1 .. 1.0
+        self.col_size.setValue(int(self.collimation_size * 100))
+        self.col_size.valueChanged.connect(self.on_collimation_size_changed)
+        
+        self.col_soft_label = QLabel()
+        self.col_soft = QSlider(Qt.Horizontal)
+        self.col_soft.setRange(0, 200)   # in pixels
+        self.col_soft.setValue(int(self.collimation_soft_px))
+        self.col_soft.valueChanged.connect(self.on_collimation_soft_changed)
+
+        self.col_out_label = QLabel()
+        self.col_out = QSlider(Qt.Horizontal)
+        self.col_out.setRange(0, 30)   # 0 .. 1
+        self.col_out.setValue(int(self.collimation_outside * 100))
+        self.col_out.valueChanged.connect(self.on_collimation_out_changed)
+
+        col_row.addWidget(self.col_checkbox)
+        col_row.addWidget(QLabel("Shape"))
+        col_row.addWidget(self.col_shape)
+        col_row.addWidget(QLabel("Size"))
+        col_row.addWidget(self.col_size, stretch=1)
+        col_row.addWidget(self.col_size_label)
+        col_row.addWidget(QLabel("Soft(px)"))
+        col_row.addWidget(self.col_soft, stretch=1)
+        col_row.addWidget(self.col_soft_label)
+        col_row.addWidget(QLabel("Outside"))
+        col_row.addWidget(self.col_out, stretch=1)
+        col_row.addWidget(self.col_out_label)
+
+        controls_layout.addLayout(col_row)
+
         # Initial label text + render
         self.sync_labels()
         self.render()
@@ -364,6 +501,9 @@ class MainWindow(QMainWindow):
         self.poisson_label.setText(f"{self.poisson_i0:5d}")
         self.scatter_label.setText(f"{int(self.scatter_strength*100):3d}%")
         self.motion_label.setText(f"{int(self.motion_blur_alpha*100):3d}%")
+        self.col_size_label.setText(f"{int(self.collimation_size * 100):3d}%")
+        self.col_soft_label.setText(f"{int(self.collimation_soft_px):3d}")
+        self.col_out_label.setText(f"{int(self.collimation_outside * 100):2d}%")
 
     def on_wl_changed(self, value: int):
         self.wl = int(value)
@@ -398,12 +538,52 @@ class MainWindow(QMainWindow):
         self.motion_blur_alpha = float(value) / 100.0
         self.sync_labels()
 
+    def invalidate_collimation_mask(self):
+        self._collimation_mask = None
+        self._collimation_mask_key = None
+
+    def on_collimation_toggled(self, checked: bool):
+        self.enable_collimation = checked
+        # no need to invalidate; we can keep the mask cached
+
+    def on_collimation_shape_changed(self, text: str):
+        self.collimation_shape = text
+        self.invalidate_collimation_mask()
+
+    def on_collimation_size_changed(self, value: int):
+        self.collimation_size = float(value) / 100.0
+        self.sync_labels()
+        self.invalidate_collimation_mask()
+
+    def on_collimation_soft_changed(self, value: int):
+        self.collimation_soft_px = int(value)
+        self.sync_labels()
+        self.invalidate_collimation_mask()
+
+    def on_collimation_out_changed(self, value: int):
+        self.collimation_outside = float(value) / 100.0
+        self.sync_labels()
+        # outside is applied after mask; no need to invalidate mask
+
     def render(self):
         qimg = u16_to_qimage_grayscale8_wlww(self.img_u16, self.wl, self.ww)
         pix = QPixmap.fromImage(qimg)
         self.image_label.setPixmap(
             pix.scaled(self.image_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
         )
+
+    def get_collimation_mask(self) -> np.ndarray:
+        h, w = self.img_u16.shape
+        key = (h, w, self.collimation_shape, round(self.collimation_size, 4), int(self.collimation_soft_px))
+        if self._collimation_mask is None or self._collimation_mask_key != key:
+            self._collimation_mask = make_collimation_mask(
+                h, w,
+                self.collimation_shape,
+                self.collimation_size,
+                self.collimation_soft_px
+            )
+            self._collimation_mask_key = key
+        return self._collimation_mask
 
     def on_tick(self):
         # Base "flat-field" signal (later: physics pipeline will replace this)
@@ -414,6 +594,14 @@ class MainWindow(QMainWindow):
                 base, 
                 self.scatter_strength, 
                 self.scatter_downsample
+            )
+
+        if self.enable_collimation:
+            mask = self.get_collimation_mask()
+            base = apply_collimation_u16(
+                base,
+                mask,
+                self.collimation_outside
             )
         
         if self.enable_motion_blur:
