@@ -16,6 +16,10 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QCheckBox,
     QComboBox,
+    QSplitter,
+    QScrollArea,
+    QGroupBox,
+    QFormLayout,
 )
 
 import imageio.v2 as imageio
@@ -327,18 +331,47 @@ class MainWindow(QMainWindow):
 
         # --- UI ---
         root = QWidget()
-        main_layout = QVBoxLayout(root)
+
+        root_layout = QVBoxLayout(root)
+        splitter = QSplitter(Qt.Horizontal)
+        # Left image view
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
+        left_layout.setContentsMargins(0,0,0,0)
 
         # Image area
         self.image_label = QLabel("Image Area")
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setMinimumSize(640, 480)
         self.image_label.setStyleSheet("background-color: #111; color: #bbb; border: 1px solid #333;") 
-        main_layout.addWidget(self.image_label, stretch=1)
 
-        # Controls area
-        controls = QWidget()
-        controls_layout = QHBoxLayout(controls)
+        left_layout.addWidget(self.image_label, stretch=1)
+    
+        splitter.addWidget(left_widget)
+
+        # Right: control panel (scrollable)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+
+        right_panel = QWidget()
+        right_layout = QVBoxLayout(right_panel)
+        right_layout.setContentsMargins(8,8,8,8)
+        right_layout.setSpacing(12)
+
+        right_scroll.setWidget(right_panel)
+        splitter.addWidget(right_scroll)
+
+        # Splitter size policy (optional but recommended)
+        splitter.setStretchFactor(0, 3)  # left grows more
+        splitter.setStretchFactor(1, 1)  # right grows less
+
+        splitter.setSizes([800, 200])
+
+        root_layout.addWidget(splitter, stretch=1)
+        self.setCentralWidget(root)
+
+        gb_display = QGroupBox("Display")
+        display_form = QFormLayout(gb_display)
 
         # WL row
         wl_row = QHBoxLayout()
@@ -347,10 +380,13 @@ class MainWindow(QMainWindow):
         self.wl_slider.setRange(0, 65535)
         self.wl_slider.setValue(self.wl)
         self.wl_slider.valueChanged.connect(self.on_wl_changed)
-        wl_row.addWidget(QLabel("WL"))
-        wl_row.addWidget(self.wl_slider, stretch=1)
-        wl_row.addWidget(self.wl_label)
-        controls_layout.addLayout(wl_row)
+
+        wl_line = QWidget()
+        wl_line_l = QHBoxLayout(wl_line)
+        wl_line_l.setContentsMargins(0,0,0,0)
+        wl_line_l.addWidget(self.wl_slider, stretch=1)
+        wl_line_l.addWidget(self.wl_label)
+        display_form.addRow("WL", wl_line)
 
         # WW row
         ww_row = QHBoxLayout()
@@ -359,48 +395,55 @@ class MainWindow(QMainWindow):
         self.ww_slider.setRange(0, 65535)
         self.ww_slider.setValue(self.ww)
         self.ww_slider.valueChanged.connect(self.on_ww_changed)
-        ww_row.addWidget(QLabel("WW"))
-        ww_row.addWidget(self.ww_slider, stretch=1)
-        ww_row.addWidget(self.ww_label)
-        controls_layout.addLayout(ww_row)
 
-        main_layout.addWidget(controls, stretch=0)        
-        self.setCentralWidget(root)
+        ww_line = QWidget()
+        ww_line_l = QHBoxLayout(ww_line)
+        ww_line_l.setContentsMargins(0,0,0,0)
+        ww_line_l.addWidget(self.ww_slider, stretch=1)
+        ww_line_l.addWidget(self.ww_label)
+        display_form.addRow("WW", ww_line)
+
+        right_layout.addWidget(gb_display)
 
         # Record now
-        record_row = QHBoxLayout()
+        gb_record = QGroupBox("Recording")
+        record_layout = QVBoxLayout(gb_record)
+
         self.btn_record_5s = QPushButton("Record 5s (MP4)")
         self.btn_record_5s.clicked.connect(self.on_record_5s)
 
         self.status_label = QLabel("Ready")
         self.status_label.setAlignment(Qt.AlignLeft)
+            
+        record_layout.addWidget(self.btn_record_5s)
+        record_layout.addWidget(self.status_label)
 
-        record_row.addWidget(self.btn_record_5s)
-        record_row.addWidget(self.status_label, stretch=1)
-        controls_layout.addLayout(record_row)
+        right_layout.addWidget(gb_record)
+
 
         # Poisson (quantum) noise controls
-        poisson_row = QHBoxLayout()
+        gb_poisson = QGroupBox("Quantum Noise (Poisson)")
+        poisson_layout = QVBoxLayout(gb_poisson)
 
         self.poisson_checkbox = QCheckBox("Quantum noise (Poisson)")
         self.poisson_checkbox.setChecked(self.enable_poisson)
         self.poisson_checkbox.toggled.connect(self.on_poisson_toggled)
-
+    
         self.poisson_label = QLabel()
         self.poisson_slider = QSlider(Qt.Horizontal)
         self.poisson_slider.setRange(1000, 65000)   # I0 range
         self.poisson_slider.setValue(self.poisson_i0)
         self.poisson_slider.valueChanged.connect(self.on_poisson_i0_changed)
+        
+        poisson_layout.addWidget(self.poisson_checkbox)
+        poisson_layout.addWidget(self.poisson_label)
+        poisson_layout.addWidget(self.poisson_slider)
 
-        poisson_row.addWidget(self.poisson_checkbox)
-        poisson_row.addWidget(QLabel("I0"))
-        poisson_row.addWidget(self.poisson_slider, stretch=1)
-        poisson_row.addWidget(self.poisson_label)
-
-        controls_layout.addLayout(poisson_row)
+        right_layout.addWidget(gb_poisson)
 
         # Scatter controls
-        scatter_row = QHBoxLayout()
+        gb_scatter = QGroupBox("Scatter Veil")
+        gb_scatter_layout = QVBoxLayout(gb_scatter)
 
         self.scatter_checkbox = QCheckBox("Scatter veil")
         self.scatter_checkbox.setChecked(self.enable_scatter)
@@ -412,15 +455,13 @@ class MainWindow(QMainWindow):
         self.scatter_slider.setValue(int(self.scatter_strength * 100))
         self.scatter_slider.valueChanged.connect(self.on_scatter_strength_changed)
 
-        scatter_row.addWidget(self.scatter_checkbox)
-        scatter_row.addWidget(QLabel("Strength"))
-        scatter_row.addWidget(self.scatter_slider, stretch=1)
-        scatter_row.addWidget(self.scatter_label)
-
-        controls_layout.addLayout(scatter_row)
+        gb_scatter_layout.addWidget(self.scatter_checkbox)
+        gb_scatter_layout.addWidget(self.scatter_label)
+        gb_scatter_layout.addWidget(self.scatter_slider)
 
         # Motion blur controls
-        motion_row = QHBoxLayout()
+        gb_motion = QGroupBox("Motion Blur")
+        gb_motion_layout = QVBoxLayout(gb_motion)
 
         self.motion_checkbox = QCheckBox("Motion blur")
         self.motion_checkbox.setChecked(self.enable_motion_blur)
@@ -432,15 +473,16 @@ class MainWindow(QMainWindow):
         self.motion_slider.setValue(int(self.motion_blur_alpha * 100))
         self.motion_slider.valueChanged.connect(self.on_motion_blur_alpha_changed)
 
-        motion_row.addWidget(self.motion_checkbox)
-        motion_row.addWidget(QLabel("Strength"))
-        motion_row.addWidget(self.motion_slider, stretch=1)
-        motion_row.addWidget(self.motion_label)
+        gb_motion_layout.addWidget(self.motion_checkbox)
+        gb_motion_layout.addWidget(self.motion_label)
+        gb_motion_layout.addWidget(self.motion_slider)
 
-        controls_layout.addLayout(motion_row)
+        right_layout.addWidget(gb_motion)
 
         # Collimation controls
-        col_row = QHBoxLayout()
+        gb_col = QGroupBox("Collimation")
+        gb_col_layout = QVBoxLayout(gb_col)
+
         self.col_checkbox = QCheckBox("Collimation")
         self.col_checkbox.setChecked(self.enable_collimation)
         self.col_checkbox.toggled.connect(self.on_collimation_toggled)
@@ -468,20 +510,21 @@ class MainWindow(QMainWindow):
         self.col_out.setValue(int(self.collimation_outside * 100))
         self.col_out.valueChanged.connect(self.on_collimation_out_changed)
 
-        col_row.addWidget(self.col_checkbox)
-        col_row.addWidget(QLabel("Shape"))
-        col_row.addWidget(self.col_shape)
-        col_row.addWidget(QLabel("Size"))
-        col_row.addWidget(self.col_size, stretch=1)
-        col_row.addWidget(self.col_size_label)
-        col_row.addWidget(QLabel("Soft(px)"))
-        col_row.addWidget(self.col_soft, stretch=1)
-        col_row.addWidget(self.col_soft_label)
-        col_row.addWidget(QLabel("Outside"))
-        col_row.addWidget(self.col_out, stretch=1)
-        col_row.addWidget(self.col_out_label)
+        gb_col_layout.addWidget(self.col_checkbox)
+        gb_col_layout.addWidget(QLabel("Shape"))
+        gb_col_layout.addWidget(self.col_shape)
+        gb_col_layout.addWidget(QLabel("Size"))
+        gb_col_layout.addWidget(self.col_size)
+        gb_col_layout.addWidget(self.col_size_label)
+        gb_col_layout.addWidget(QLabel("Soft edge (px)"))
+        gb_col_layout.addWidget(self.col_soft)
+        gb_col_layout.addWidget(self.col_soft_label)
+        gb_col_layout.addWidget(QLabel("Outside level"))
+        gb_col_layout.addWidget(self.col_out)
+        gb_col_layout.addWidget(self.col_out_label)
+        right_layout.addWidget(gb_col)
 
-        controls_layout.addLayout(col_row)
+        right_layout.addStretch(1)
 
         # Initial label text + render
         self.sync_labels()
